@@ -1,0 +1,38 @@
+# Compiled Go binaries
+bin/
+synapse-server
+synapse-cli
+
+# Database Persistence
+*.aof
+synapse.aof
+
+# Python Environments & Caches
+mcp_server/.venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Security & Secrets (CRITICAL)
+.env
+*.pem
+cert.pem
+key.pem
+
+# Local Knowledge Base
+# We ignore the contents but keep the folder structure
+knowledge_base/*
+knowledge_base_test/*
+!knowledge_base/.gitkeep
+!knowledge_base_test/.gitkeep
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

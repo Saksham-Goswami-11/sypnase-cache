@@ -1,0 +1,34 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies if required for any python packages
+# rank_bm25, tiktoken, pypdf, watchdog generally don't require heavy system libraries, 
+# but it's good practice to keep the image slim.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install
+COPY mcp_server/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Set up environment variables
+ENV PYTHONUNBUFFERED=1
+# Force tiktoken to cache encodings locally in the app directory to avoid runtime downloads
+ENV TIKTOKEN_CACHE_DIR=/app/.cache/tiktoken
+
+# Pre-download tiktoken encodings during build to prevent runtime delays
+RUN python3 -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
+# Copy the actual Python server code
+COPY mcp_server/ ./mcp_server/
+
+# Ensure the knowledge base directory exists
+RUN mkdir -p /app/knowledge_base
+
+# The entrypoint will just be python3. 
+# The CMD specifies the script to run, allowing docker-compose to easily override it 
+# (e.g. to run ingest.py instead of server.py).
+ENTRYPOINT ["python3"]
+CMD ["mcp_server/server.py"]

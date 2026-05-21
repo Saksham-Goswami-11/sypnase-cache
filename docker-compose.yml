@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  synapse-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: synapse-cache
+    ports:
+      - "6380:6380"
+    volumes:
+      # Persist the AOF log so database state survives container restarts
+      - ./synapse.aof:/app/synapse.aof
+      - ./cert.pem:/app/cert.pem
+      - ./key.pem:/app/key.pem
+    environment:
+      - SYNAPSE_PORT=6380
+      # Pass the password from the host environment, fallback to empty string if not set
+      - SYNAPSE_PASSWORD=${SYNAPSE_PASSWORD:-}
+      - SYNAPSE_TLS=${SYNAPSE_TLS:-false}
+    command: ["-tls", "-cert", "/app/cert.pem", "-key", "/app/key.pem", "-aof", "/app/synapse.aof"]
+    restart: unless-stopped
+
+  synapse-rag-ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: synapse-rag-ingest
+    # Run the ingestion daemon rather than the MCP server
+    command: ["mcp_server/ingest.py"]
+    depends_on:
+      - synapse-cache
+    volumes:
+      # Mount the local knowledge base directory for live watchdog monitoring
+      - ./knowledge_base:/app/knowledge_base
+    environment:
+      - SYNAPSE_PORT=6380
+      - SYNAPSE_HOST=synapse-cache
+      - SYNAPSE_PASSWORD=${SYNAPSE_PASSWORD:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - SYNAPSE_TLS=${SYNAPSE_TLS:-false}
+      - SYNAPSE_INSECURE_SKIP_VERIFY=${SYNAPSE_INSECURE_SKIP_VERIFY:-false}
+    restart: unless-stopped
+
+  synapse-rag-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: synapse-rag-mcp
+    # Run the FastMCP server (defaults to stdio transport)
+    command: ["mcp_server/server.py"]
+    depends_on:
+      - synapse-cache
+    volumes:
+      - ./knowledge_base:/app/knowledge_base
+    environment:
+      - SYNAPSE_PORT=6380
+      - SYNAPSE_HOST=synapse-cache
+      - SYNAPSE_PASSWORD=${SYNAPSE_PASSWORD:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - SYNAPSE_TLS=${SYNAPSE_TLS:-false}
+      - SYNAPSE_INSECURE_SKIP_VERIFY=${SYNAPSE_INSECURE_SKIP_VERIFY:-false}
+    # Keep standard input open so it doesn't immediately exit when waiting for MCP stdio messages
+    stdin_open: true
+    tty: true
+    restart: unless-stopped

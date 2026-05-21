@@ -1,0 +1,36 @@
+# Stage 1: Build the Go binaries
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+# Download dependencies
+COPY go.mod ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build statically linked binaries
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o bin/synapse-server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o bin/synapse-cli ./cmd/cli
+
+# Stage 2: Create the minimal runtime image
+FROM alpine:latest
+
+WORKDIR /app
+
+# Install CA certificates (useful for any outgoing TLS calls if needed)
+RUN apk --no-cache add ca-certificates
+
+# Copy binaries from the builder stage
+COPY --from=builder /app/bin/synapse-server /usr/local/bin/
+COPY --from=builder /app/bin/synapse-cli /usr/local/bin/
+
+# Expose the default TCP port
+EXPOSE 6380
+
+# Set entrypoint to the server binary
+ENTRYPOINT ["synapse-server"]
+
+# Default command flags (these can be overridden by docker-compose or run arguments)
+CMD ["-port", "6380", "-aof", "/app/synapse.aof"]

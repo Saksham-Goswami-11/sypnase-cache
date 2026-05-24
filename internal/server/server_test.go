@@ -15,7 +15,7 @@ import (
 func startTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	s := store.New()
-	srv := New(":0", "", s) // port 0 = OS picks a random free port
+	srv := New(":0", "", false, "", "", s) // port 0 = OS picks a random free port
 
 	errCh := make(chan error, 1)
 	go func() {

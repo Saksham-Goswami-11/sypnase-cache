@@ -64,9 +64,9 @@ func runCommand(c *client.Client, cmd string) {
 		fmt.Printf("(error) %v\n", err)
 		return
 	}
-	if resp == "" {
+	if resp.IsNil {
 		fmt.Println("(nil)")
 		return
 	}
-	fmt.Println(resp)
+	fmt.Println(resp.Str)
 }

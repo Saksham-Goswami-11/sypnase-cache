@@ -177,7 +177,7 @@ func (srv *Server) handleConnection(conn net.Conn) {
 	defer srv.wg.Done()
 	defer conn.Close()
 
-	// Panic recovery — a panic in one connection must not crash the server.
+	// Recover from handler panics
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("recovered panic in connection handler: %v", r)
@@ -226,7 +226,7 @@ func (srv *Server) dispatch(client *Client, cmd protocol.Command) protocol.Respo
 	aof := srv.aof
 	srv.mu.Unlock()
 
-	// If AOF is enabled, command succeeded, and is mutative -> write to AOF
+	// Write mutative commands to AOF
 	if aof != nil {
 		if _, isErr := resp.(*protocol.ErrorResponse); !isErr {
 			if isMutative(cmd.Name) {
@@ -252,10 +252,10 @@ func isMutative(name string) bool {
 func (srv *Server) ExecuteCommand(client *Client, cmd protocol.Command) protocol.Response {
 	cmdName := strings.ToUpper(cmd.Name) // e.g., "AUTH", "SET"
 
-	// THE SECURITY GATE
+	// Enforce authentication
 	if srv.RequirePass != "" && !client.Authenticated {
 		if cmdName != "AUTH" {
-			// Reject everything else immediately
+			// Reject unauthenticated commands
 			return &protocol.ErrorResponse{Message: "ERR NOAUTH Authentication required"}
 		}
 	}

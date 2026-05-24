@@ -12,7 +12,7 @@ import (
 func startAuthServer(t *testing.T, password string) (string, func()) {
 	t.Helper()
 	s := store.New()
-	srv := server.New(":0", password, s)
+	srv := server.New(":0", password, false, "", "", s)
 
 	go srv.ListenAndServe()
 	srv.WaitReady()

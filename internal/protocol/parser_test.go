@@ -184,3 +184,18 @@ func TestResponseSerialization(t *testing.T) {
 		}
 	}
 }
+
+func TestParseOOMMitigation(t *testing.T) {
+	// Create a payload larger than maxLineLength (64KB)
+	largePayload := "SET key " + strings.Repeat("A", 65*1024) + "\r\n"
+	reader := bufio.NewReader(strings.NewReader(largePayload))
+
+	_, err := Parse(reader)
+	if err == nil {
+		t.Fatalf("expected error for payload exceeding max length, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "exceeds maximum length") {
+		t.Errorf("expected max length error, got: %v", err)
+	}
+}

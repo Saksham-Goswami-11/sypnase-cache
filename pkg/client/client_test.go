@@ -12,7 +12,7 @@ import (
 func startServer(t *testing.T) (string, func()) {
 	t.Helper()
 	s := store.New()
-	srv := server.New(":0", "", s)
+	srv := server.New(":0", "", false, "", "", s)
 
 	go srv.ListenAndServe()
 	srv.WaitReady()
@@ -201,5 +201,98 @@ func TestClientContextCancellation(t *testing.T) {
 	_, err = c.Get(ctx, "key")
 	if err == nil {
 		t.Error("expected error from cancelled context")
+	}
+}
+
+func TestClientExpireAndTTL(t *testing.T) {
+	addr, shutdown := startServer(t)
+	defer shutdown()
+
+	c, err := New(Options{Addr: addr})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+	c.Set(ctx, "temp", "val", 0)
+
+	// Set Expiration
+	ok, err := c.Expire(ctx, "temp", 2*time.Second)
+	if err != nil {
+		t.Fatalf("Expire: %v", err)
+	}
+	if !ok {
+		t.Error("expected Expire to return true")
+	}
+
+	// Check TTL
+	ttl, err := c.TTL(ctx, "temp")
+	if err != nil {
+		t.Fatalf("TTL: %v", err)
+	}
+	if ttl <= 0 || ttl > 2 {
+		t.Errorf("expected TTL between 1 and 2, got %d", ttl)
+	}
+}
+
+func TestClientInfo(t *testing.T) {
+	addr, shutdown := startServer(t)
+	defer shutdown()
+
+	c, err := New(Options{Addr: addr})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+	info, err := c.Info(ctx)
+	if err != nil {
+		t.Fatalf("Info: %v", err)
+	}
+	if info == "" {
+		t.Error("expected non-empty info string")
+	}
+}
+
+func TestClientVGetAndVDel(t *testing.T) {
+	addr, shutdown := startServer(t)
+	defer shutdown()
+
+	c, err := New(Options{Addr: addr})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer c.Close()
+
+	ctx := context.Background()
+
+	// Store vector
+	vec := []float32{0.5, 0.5, 0.5}
+	c.VSet(ctx, VSetArgs{Namespace: "docs", ID: "chunk:1", Vector: vec})
+
+	// VGet
+	got, err := c.VGet(ctx, "docs", "chunk:1")
+	if err != nil {
+		t.Fatalf("VGet: %v", err)
+	}
+	if len(got) != len(vec) {
+		t.Fatalf("expected vector length %d, got %d", len(vec), len(got))
+	}
+
+	// VDel
+	ok, err := c.VDel(ctx, "docs", "chunk:1")
+	if err != nil {
+		t.Fatalf("VDel: %v", err)
+	}
+	if !ok {
+		t.Error("expected VDel to return true")
+	}
+
+	// VGet missing
+	_, err = c.VGet(ctx, "docs", "chunk:1")
+	if err != ErrNil {
+		t.Errorf("expected ErrNil for missing vector, got %v", err)
 	}
 }

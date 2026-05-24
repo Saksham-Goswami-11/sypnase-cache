@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -19,7 +20,7 @@ type Options struct {
 	DialTimeout time.Duration
 }
 
-// Client is the Synapse Cache Go client.
+// Client represents a Synapse Cache connection.
 type Client struct {
 	opts Options
 	pool chan net.Conn
@@ -59,7 +60,7 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// dial creates a new TCP connection and authenticates if a password is set.
+// dial opens a new authenticated TCP connection.
 func (c *Client) dial() (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", c.opts.Addr, c.opts.DialTimeout)
 	if err != nil {
@@ -107,11 +108,18 @@ func (c *Client) returnConn(conn net.Conn) {
 	}
 }
 
-// RawExec sends a raw command and returns the raw response lines.
-func (c *Client) RawExec(ctx context.Context, cmd string) (string, error) {
+// RespValue represents a parsed RESP response.
+type RespValue struct {
+	IsNil bool
+	Str   string
+	Array []RespValue
+}
+
+// RawExec executes a raw command.
+func (c *Client) RawExec(ctx context.Context, cmd string) (RespValue, error) {
 	conn, err := c.getConn(ctx)
 	if err != nil {
-		return "", err
+		return RespValue{}, err
 	}
 
 	deadline, ok := ctx.Deadline()
@@ -124,30 +132,30 @@ func (c *Client) RawExec(ctx context.Context, cmd string) (string, error) {
 	_, err = fmt.Fprint(conn, cmd+"\r\n")
 	if err != nil {
 		conn.Close()
-		return "", fmt.Errorf("write error: %w", err)
+		return RespValue{}, fmt.Errorf("write error: %w", err)
 	}
 
 	reader := bufio.NewReader(conn)
 	resp, err := readResponse(reader)
 	if err != nil {
 		conn.Close()
-		return "", err
+		return RespValue{}, err
 	}
 
 	c.returnConn(conn)
 	return resp, nil
 }
 
-// readResponse reads a single RESP response.
-func readResponse(reader *bufio.Reader) (string, error) {
+// readResponse decodes a RESP payload.
+func readResponse(reader *bufio.Reader) (RespValue, error) {
 	line, err := reader.ReadString('\n')
 	if err != nil {
-		return "", err
+		return RespValue{}, err
 	}
 	line = strings.TrimRight(line, "\r\n")
 
 	if len(line) == 0 {
-		return "", fmt.Errorf("empty response")
+		return RespValue{}, fmt.Errorf("empty response")
 	}
 
 	prefix := line[0]
@@ -155,52 +163,52 @@ func readResponse(reader *bufio.Reader) (string, error) {
 
 	switch prefix {
 	case '+':
-		return body, nil
+		return RespValue{Str: body}, nil
 	case '-':
-		return "", fmt.Errorf("server error: %s", body)
+		return RespValue{}, fmt.Errorf("server error: %s", body)
 	case ':':
-		return body, nil
+		return RespValue{Str: body}, nil
 	case '$':
 		length, err := strconv.Atoi(body)
 		if err != nil {
-			return "", fmt.Errorf("invalid bulk string length: %s", body)
+			return RespValue{}, fmt.Errorf("invalid bulk string length: %s", body)
 		}
 		if length == -1 {
-			return "", ErrNil
+			return RespValue{IsNil: true}, ErrNil
 		}
 		// Read the data + \r\n
 		data := make([]byte, length+2)
-		_, err = reader.Read(data)
+		_, err = io.ReadFull(reader, data)
 		if err != nil {
-			return "", err
+			return RespValue{}, err
 		}
-		return string(data[:length]), nil
+		return RespValue{Str: string(data[:length])}, nil
 	case '*':
 		// Array — read recursively
 		count, err := strconv.Atoi(body)
 		if err != nil {
-			return "", fmt.Errorf("invalid array count: %s", body)
+			return RespValue{}, fmt.Errorf("invalid array count: %s", body)
 		}
 		if count <= 0 {
-			return "", nil
+			return RespValue{Array: []RespValue{}}, nil
 		}
-		var items []string
+		var items []RespValue
 		for i := 0; i < count; i++ {
 			item, err := readResponse(reader)
-			if err != nil {
-				return "", err
+			if err != nil && err != ErrNil {
+				return RespValue{}, err
 			}
 			items = append(items, item)
 		}
-		return strings.Join(items, "\n"), nil
+		return RespValue{Array: items}, nil
 	default:
-		return line, nil
+		return RespValue{Str: line}, nil
 	}
 }
 
 // --- Error types ---
 
-// ErrNil is returned when a key or vector is not found.
+// ErrNil indicates a cache miss.
 var ErrNil = fmt.Errorf("nil")
 
 // --- Key-Value Operations ---
@@ -215,9 +223,13 @@ func (c *Client) Set(ctx context.Context, key, value string, ttl time.Duration) 
 	return err
 }
 
-// Get retrieves a value by key. Returns ErrNil if not found.
+// Get retrieves a value by key.
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	return c.RawExec(ctx, fmt.Sprintf("GET %s", key))
+	resp, err := c.RawExec(ctx, fmt.Sprintf("GET %s", key))
+	if err != nil {
+		return "", err
+	}
+	return resp.Str, nil
 }
 
 // Del deletes keys and returns the count deleted.
@@ -226,8 +238,36 @@ func (c *Client) Del(ctx context.Context, keys ...string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n, _ := strconv.Atoi(resp)
+	n, _ := strconv.Atoi(resp.Str)
 	return n, nil
+}
+
+// Expire sets a key's TTL.
+func (c *Client) Expire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	resp, err := c.RawExec(ctx, fmt.Sprintf("EXPIRE %s %d", key, int(ttl.Seconds())))
+	if err != nil {
+		return false, err
+	}
+	return resp.Str == "1", nil
+}
+
+// TTL returns the remaining time to live of a key.
+func (c *Client) TTL(ctx context.Context, key string) (int, error) {
+	resp, err := c.RawExec(ctx, fmt.Sprintf("TTL %s", key))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := strconv.Atoi(resp.Str)
+	return n, nil
+}
+
+// Info returns the server information.
+func (c *Client) Info(ctx context.Context) (string, error) {
+	resp, err := c.RawExec(ctx, "INFO")
+	if err != nil {
+		return "", err
+	}
+	return resp.Str, nil
 }
 
 // --- Vector Operations ---
@@ -240,7 +280,7 @@ type VSetArgs struct {
 	Metadata  map[string]string
 }
 
-// VSet stores a vector.
+// VSet inserts a vector.
 func (c *Client) VSet(ctx context.Context, args VSetArgs) error {
 	parts := []string{"VSET", args.Namespace, args.ID, strconv.Itoa(len(args.Vector))}
 	for _, f := range args.Vector {
@@ -270,7 +310,35 @@ type SimilarityResult struct {
 	Metadata map[string]string
 }
 
-// VSimilarity performs a top-K cosine similarity search.
+// VGet retrieves a vector. Returns ErrNil if not found.
+func (c *Client) VGet(ctx context.Context, namespace, id string) ([]float32, error) {
+	resp, err := c.RawExec(ctx, fmt.Sprintf("VGET %s %s", namespace, id))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(resp.Array) == 0 && resp.IsNil {
+		return nil, ErrNil
+	}
+
+	vec := make([]float32, len(resp.Array))
+	for i, item := range resp.Array {
+		f, _ := strconv.ParseFloat(item.Str, 32)
+		vec[i] = float32(f)
+	}
+	return vec, nil
+}
+
+// VDel deletes a vector.
+func (c *Client) VDel(ctx context.Context, namespace, id string) (bool, error) {
+	resp, err := c.RawExec(ctx, fmt.Sprintf("VDEL %s %s", namespace, id))
+	if err != nil {
+		return false, err
+	}
+	return resp.Str == "1", nil
+}
+
+// VSimilarity executes a Top-K cosine similarity search.
 func (c *Client) VSimilarity(ctx context.Context, args VSimilarityArgs) ([]SimilarityResult, error) {
 	parts := []string{"VSIMILARITY", args.Namespace, strconv.Itoa(len(args.Vector))}
 	for _, f := range args.Vector {
@@ -283,30 +351,26 @@ func (c *Client) VSimilarity(ctx context.Context, args VSimilarityArgs) ([]Simil
 		return nil, err
 	}
 
-	if resp == "" {
+	if len(resp.Array) == 0 {
 		return nil, nil
 	}
 
-	// Parse response: lines of [id, score, meta...]
-	// Each result is 3 lines: id, score, metadata
-	lines := strings.Split(resp, "\n")
+	// Result is an array where each match is 3 items: [ID, Score, [MetaKey, MetaVal, ...]]
 	var results []SimilarityResult
+	for i := 0; i+2 < len(resp.Array); i += 3 {
+		id := resp.Array[i].Str
+		score, _ := strconv.ParseFloat(resp.Array[i+1].Str, 32)
 
-	for i := 0; i+2 < len(lines); i += 3 {
-		score, _ := strconv.ParseFloat(lines[i+1], 32)
 		result := SimilarityResult{
-			ID:    lines[i],
+			ID:    id,
 			Score: float32(score),
 		}
-		// Parse metadata from the third line (if any)
-		metaLine := lines[i+2]
-		if metaLine != "" {
-			metaParts := strings.Split(metaLine, "\n")
-			if len(metaParts) >= 2 {
-				result.Metadata = make(map[string]string)
-				for j := 0; j+1 < len(metaParts); j += 2 {
-					result.Metadata[metaParts[j]] = metaParts[j+1]
-				}
+
+		metaArray := resp.Array[i+2].Array
+		if len(metaArray) > 0 {
+			result.Metadata = make(map[string]string)
+			for j := 0; j+1 < len(metaArray); j += 2 {
+				result.Metadata[metaArray[j].Str] = metaArray[j+1].Str
 			}
 		}
 		results = append(results, result)
@@ -321,7 +385,7 @@ func (c *Client) VCount(ctx context.Context, namespace string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n, _ := strconv.Atoi(resp)
+	n, _ := strconv.Atoi(resp.Str)
 	return n, nil
 }
 

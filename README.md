@@ -140,14 +140,14 @@ Synapse Cache is a single-process TCP server. No runtime dependencies, no embedd
 graph TD
     Client[Client] -- TCP --> Server[TCP Accept Loop]
     Server -- One goroutine per connection --> Parser[Protocol Parser]
-    Parser -- SET / GET / DEL --> KV[KV Namespace\nstring + TTL]
-    Parser -- VSET / VGET / VDEL --> VN[Vector Namespace\n[]float32 + metadata]
-    Parser -- VSIMILARITY --> Pool[Similarity Worker Pool\nGOMAXPROCS workers]
+    Parser -- SET / GET / DEL --> KV["KV Namespace\nstring + TTL"]
+    Parser -- VSET / VGET / VDEL --> VN["Vector Namespace\n[]float32 + metadata"]
+    Parser -- VSIMILARITY --> Pool["Similarity Worker Pool\nGOMAXPROCS workers"]
     Pool -- RLock → copy slice headers → unlock --> VN
-    Pool -- parallel cosine compute --> TopK[Min-heap Top-K]
-    KV --> Store[(sync.RWMutex\nIn-Memory Store)]
+    Pool -- parallel cosine compute --> TopK["Min-heap Top-K"]
+    KV --> Store[("sync.RWMutex\nIn-Memory Store")]
     VN --> Store
-    Store -- BGSAVE / shutdown --> AOF[(AOF Log\nsynapse.aof)]
+    Store -- BGSAVE / shutdown --> AOF[("AOF Log\nsynapse.aof")]
 ```
 
 **Three concurrency layers, each with a clean scope:**

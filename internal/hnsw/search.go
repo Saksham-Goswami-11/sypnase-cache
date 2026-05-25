@@ -165,6 +165,10 @@ func (idx *Index) Insert(key string, vector []float32, metadata map[string]strin
 
 		// Add bidirectional links
 		for _, neighborID := range neighbors {
+			if neighborID == internalID {
+				continue // Prevent double-lock deadlock and self-linking
+			}
+
 			idx.mu.RLock()
 			if int(neighborID) >= len(idx.nodes) {
 				idx.mu.RUnlock()

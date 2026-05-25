@@ -44,7 +44,7 @@ It works. Until it doesn't. At 10K chunks that JSON round-trip adds up. At 100K 
 
 The alternative is deploying Chroma, Weaviate, or Pinecone — full database systems with Docker dependencies, network hops, authentication layers, and operational surface area that dwarfs your actual use case.
 
-**There's nothing in the middle.** A lightweight, zero-dependency, embeddable vector cache you can start with one binary and query with five lines of Go.
+**There's nothing in the middle.** A lightweight, zero-dependency, embeddable vector cache you can start with one binary and query with five lines of Go. With built-in support for exact Brute-Force search and an O(log N) HNSW approximate nearest neighbor index.
 
 That's what Synapse Cache is.
 
@@ -72,7 +72,7 @@ Redis approach:               Synapse Cache approach:
    ~40ms at 10K vectors           ~4ms at 10K vectors
 ```
 
-One architectural decision. 10× faster on the similarity path.
+One architectural decision. 10× faster on the similarity path. And with v2.0, we introduced a thread-safe, concurrent HNSW index that takes search from O(N) to O(log N) for large-scale datasets, right out of the box.
 
 ---
 
@@ -142,7 +142,10 @@ graph TD
     Server -- One goroutine per connection --> Parser[Protocol Parser]
     Parser -- SET / GET / DEL --> KV["KV Namespace\nstring + TTL"]
     Parser -- VSET / VGET / VDEL --> VN["Vector Namespace\n[]float32 + metadata"]
-    Parser -- VSIMILARITY --> Pool["Similarity Worker Pool\nGOMAXPROCS workers"]
+    Parser -- VINDEX --> HNSW["HNSW Index\nO(log N) Search"]
+    Parser -- VSIMILARITY --> Router{"Has Index?"}
+    Router -- Yes --> HNSW
+    Router -- No --> Pool["Similarity Worker Pool\nGOMAXPROCS workers"]
     Pool -- RLock → copy slice headers → unlock --> VN
     Pool -- parallel cosine compute --> TopK["Min-heap Top-K"]
     KV --> Store[("sync.RWMutex\nIn-Memory Store")]
@@ -384,9 +387,9 @@ The race detector has never fired on the similarity engine. That's not an accide
 
 ## Design Decisions
 
-**Why brute-force and not HNSW/IVF?**
+**Why brute-force AND HNSW?**
 
-Approximate nearest-neighbor indexes (HNSW, IVF, ScaNN) are the right call above roughly 500K vectors. Below that, brute-force exact search is simpler, requires no index build time, requires no tuning of `ef_search` or `nprobe`, and gives you mathematically correct results every time. For a cache serving a single application's corpus — which is almost always under 100K chunks — brute-force is the correct engineering choice, not a compromise.
+Brute-force exact search is simpler, requires no index build time, and gives mathematically correct results every time. It's the right choice for small corpora (< 100K). For larger datasets, Synapse Cache provides a built-in HNSW index. It builds concurrently, persists via zero-copy binary snapshots, and achieves >99% recall at a fraction of the latency. You choose what fits your scale.
 
 **Why a custom protocol and not HTTP/gRPC?**
 
@@ -414,11 +417,12 @@ Redis Stack's `FT.SEARCH` with vector fields is a real option for production. It
 - [x] Go client library (`pkg/client`)
 - [x] RAG demo with mock + live modes
 - [x] MCP server for Claude Desktop
+- [x] Approximate NN via HNSW graph (v2.0)
+- [x] Binary Snapshot Persistence for HNSW
 - [ ] Token authentication (`--auth` flag)
 - [ ] Dot product similarity mode (`METHOD DOT`)
 - [ ] Batch VSET (`VMSET`) for bulk ingestion
 - [ ] Prometheus metrics endpoint
-- [ ] Approximate NN via NSW graph (v2.0)
 
 ---
 

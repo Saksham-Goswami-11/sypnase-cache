@@ -23,6 +23,7 @@ func main() {
 	tlsEnabled := flag.Bool("tls", false, "Enable TLS encryption")
 	certFile := flag.String("cert", "cert.pem", "Path to TLS certificate")
 	keyFile := flag.String("key", "key.pem", "Path to TLS private key")
+	snapshotsDir := flag.String("snapshots", "data/snapshots", "Directory to store HNSW snapshots")
 	flag.Parse()
 
 	// Override from environment variables
@@ -73,6 +74,12 @@ func main() {
 		srv.SetAOF(aofWriter)
 	}
 
+	// Load HNSW Snapshots
+	log.Printf("loading HNSW snapshots from %s...", *snapshotsDir)
+	if err := srv.LoadSnapshots(*snapshotsDir); err != nil {
+		log.Printf("warning: failed to load snapshots: %v", err)
+	}
+
 	// Graceful shutdown on SIGTERM / SIGINT
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -84,6 +91,13 @@ func main() {
 		if aofWriter != nil {
 			aofWriter.Sync()
 			aofWriter.Close()
+		}
+		
+		log.Printf("saving HNSW snapshots to %s...", *snapshotsDir)
+		if err := srv.SaveSnapshots(*snapshotsDir); err != nil {
+			log.Printf("failed to save snapshots: %v", err)
+		} else {
+			log.Println("snapshots saved successfully")
 		}
 	}()
 

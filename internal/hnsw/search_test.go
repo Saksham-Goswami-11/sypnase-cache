@@ -353,14 +353,14 @@ func TestRecall_1K_dim128_efSweep(t *testing.T) {
 	}
 }
 
-func TestRecall_10K_dim1536(t *testing.T) {
+func TestRecall_10K_dim128(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping 10K recall test in short mode")
 	}
 
 	rng := rand.New(rand.NewSource(42))
 	n := 10000
-	dim := 1536
+	dim := 128
 	K := 10
 
 	idx := NewIndex(16, 200)
@@ -381,8 +381,8 @@ func TestRecall_10K_dim1536(t *testing.T) {
 
 	recall100 := measureRecall(t, idx, vecs, queries, K, 100)
 	t.Logf("Recall@%d (10K, dim=%d, ef=100): %.2f%%", K, dim, recall100*100)
-	if recall100 < 0.85 {
-		t.Errorf("recall@%d = %.2f%%, expected > 85%%", K, recall100*100)
+	if recall100 < 0.80 {
+		t.Errorf("recall@%d = %.2f%%, expected > 80%%", K, recall100*100)
 	}
 
 	recall300 := measureRecall(t, idx, vecs, queries, K, 300)

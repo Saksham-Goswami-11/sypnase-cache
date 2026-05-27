@@ -389,6 +389,51 @@ func (c *Client) VCount(ctx context.Context, namespace string) (int, error) {
 	return n, nil
 }
 
+// VIndexCreateArgs holds arguments for the VINDEX CREATE command.
+type VIndexCreateArgs struct {
+	Namespace      string
+	M              int
+	EfConstruction int
+	EfSearch       int
+}
+
+// VIndexCreate creates a new HNSW index for the given namespace.
+func (c *Client) VIndexCreate(ctx context.Context, args VIndexCreateArgs) error {
+	parts := []string{"VINDEX", "CREATE", args.Namespace}
+	if args.M > 0 {
+		parts = append(parts, "M", strconv.Itoa(args.M))
+	}
+	if args.EfConstruction > 0 {
+		parts = append(parts, "EF_CONSTRUCTION", strconv.Itoa(args.EfConstruction))
+	}
+	if args.EfSearch > 0 {
+		parts = append(parts, "EF_SEARCH", strconv.Itoa(args.EfSearch))
+	}
+	_, err := c.RawExec(ctx, strings.Join(parts, " "))
+	return err
+}
+
+// VIndexDrop drops an existing HNSW index.
+func (c *Client) VIndexDrop(ctx context.Context, namespace string) error {
+	_, err := c.RawExec(ctx, fmt.Sprintf("VINDEX DROP %s", namespace))
+	return err
+}
+
+// VIndexInfo returns information about an HNSW index.
+func (c *Client) VIndexInfo(ctx context.Context, namespace string) (string, error) {
+	resp, err := c.RawExec(ctx, fmt.Sprintf("VINDEX INFO %s", namespace))
+	if err != nil {
+		return "", err
+	}
+	return resp.Str, nil
+}
+
+// VIndexSetEf sets the ef_search parameter for an HNSW index.
+func (c *Client) VIndexSetEf(ctx context.Context, namespace string, ef int) error {
+	_, err := c.RawExec(ctx, fmt.Sprintf("VINDEX SET_EF %s %d", namespace, ef))
+	return err
+}
+
 // Ping sends a PING command.
 func (c *Client) Ping(ctx context.Context) error {
 	_, err := c.RawExec(ctx, "PING")

@@ -6,6 +6,7 @@ synapse-cli
 # Database Persistence
 *.aof
 synapse.aof
+*.hnsw.snap
 
 # Python Environments & Caches
 mcp_server/.venv/

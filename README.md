@@ -16,8 +16,8 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat-square&logo=go)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square)]()
-[![Race Detector](https://img.shields.io/badge/race%20detector-clean-brightgreen?style=flat-square)]()
+[![Go Report Card](https://goreportcard.com/badge/github.com/sakshamgoswami/synapse-cache?style=flat-square)](https://goreportcard.com/report/github.com/sakshamgoswami/synapse-cache)
+[![Tests](https://img.shields.io/github/actions/workflow/status/sakshamgoswami/synapse-cache/test.yml?label=tests&style=flat-square)](https://github.com/sakshamgoswami/synapse-cache/actions)
 
 </div>
 
@@ -44,7 +44,7 @@ It works. Until it doesn't. At 10K chunks that JSON round-trip adds up. At 100K 
 
 The alternative is deploying Chroma, Weaviate, or Pinecone — full database systems with Docker dependencies, network hops, authentication layers, and operational surface area that dwarfs your actual use case.
 
-**There's nothing in the middle.** A lightweight, zero-dependency, embeddable vector cache you can start with one binary and query with five lines of Go. With built-in support for exact Brute-Force search and an O(log N) HNSW approximate nearest neighbor index.
+**There's nothing in the middle.** A lightweight, zero-dependency vector cache you can start with one binary and query with five lines of Go. With built-in exact brute-force search *and* an O(log N) HNSW approximate nearest neighbor index — both from scratch.
 
 That's what Synapse Cache is.
 
@@ -72,28 +72,50 @@ Redis approach:               Synapse Cache approach:
    ~40ms at 10K vectors           ~4ms at 10K vectors
 ```
 
-One architectural decision. 10× faster on the similarity path. And with v2.0, we introduced a thread-safe, concurrent HNSW index that takes search from O(N) to O(log N) for large-scale datasets, right out of the box.
+One architectural decision. 10× faster on the similarity path.
+
+v2.0 goes further — a fully concurrent HNSW graph index built from the [Malkov & Yashunin 2018 paper](https://arxiv.org/abs/1603.09320), taking search from O(N) to O(log N) for large-scale datasets.
 
 ---
 
 ## Benchmarks
 
+### Synthetic (go test -bench)
+
 Measured on Apple M-series, `go test -bench ./bench/... -benchtime=5s`.
 
 | Benchmark | Corpus | p50 latency | vs. Redis+JSON |
-|-----------|--------|------------|----------------|
+|-----------|--------|-------------|----------------|
 | `BenchmarkVSimilarity1K` | 1,000 × dim-1536 | **0.75ms** | ~53× faster |
 | `BenchmarkVSimilarity10K` | 10,000 × dim-1536 | **4.48ms** | ~89× faster |
 | `BenchmarkVSimilarity100K` | 100,000 × dim-1536 | **42.3ms** | ~94× faster |
 | `BenchmarkSetGet` | 100-byte values | ~30K ops/s | (KV not the story) |
 | `BenchmarkVSet1536` | dim-1536 vectors | ~4.6K ops/s | baseline |
 
-> The Redis comparison measures a Lua-side scan over JSON-deserialized vectors — the standard pattern for Redis-based RAG caches. KV throughput trails Redis (which has 15 years of optimization). The similarity path is where Synapse wins.
+> The Redis comparison measures a Lua-side scan over JSON-deserialized vectors — the standard pattern for Redis-based RAG caches. KV throughput trails Redis (15 years of optimization). The similarity path is where Synapse wins.
 
-To reproduce:
 ```bash
 go test -bench=. -benchmem ./bench/...
 ```
+
+### Real-World Results (DocuMind RAG Pipeline)
+
+Wired Synapse Cache into a live document Q&A pipeline to measure actual end-to-end impact. These are wall-clock latencies on real document retrieval queries — not synthetic.
+
+| Configuration | Total Latency | Retrieval | Speedup |
+|---------------|--------------|-----------|---------|
+| ChromaDB baseline | **9,024ms** | 4,349ms | — |
+| Synapse Cache (brute-force) | **2,049ms** | 19ms | **4.4×** |
+| Synapse Cache + HNSW (semantic cache hit) | **312ms** | 8.5ms (Go engine) | **29×** |
+
+**What the numbers reveal:**
+
+- Retrieval dropped from **4,349ms → 19ms** — a 229× improvement on the bottleneck eating half the pipeline
+- The reranker collapsed from 3,496ms → 276ms — better retrieval quality means less rescue work downstream
+- With HNSW + semantic caching, the Go engine handles similarity search in **8.5ms**. The remaining 146ms is Python bridge overhead, not Synapse
+- ChromaDB, the reranker, and the LLM are bypassed entirely on cache hits
+
+> The LLM now dominates latency at 69.7% of total time — which is exactly how a healthy RAG pipeline should look. When your retrieval is fast, the model becomes the bottleneck. That's the goal.
 
 ---
 
@@ -107,7 +129,7 @@ docker run -p 6379:6379 synapse-cache
 
 **Option 2 — Build from source**
 ```bash
-git clone https://github.com/your-handle/synapse-cache
+git clone https://github.com/sakshamgoswami/synapse-cache
 cd synapse-cache
 go build -o synapse ./cmd/server
 ./synapse --port 6379
@@ -128,6 +150,10 @@ echo -e "VSIMILARITY docs 3 0.1 0.2 0.9 TOP 1\r" | nc localhost 6379
 # chunk:1
 # +1.0000
 # ...
+
+# Build an HNSW index for O(log N) search
+echo -e "VINDEX CREATE docs M 16 EF_CONSTRUCTION 200\r" | nc localhost 6379
+# +OK
 ```
 
 ---
@@ -162,6 +188,28 @@ graph TD
 3. **Similarity worker pool** — a semaphore-bounded pool (`runtime.GOMAXPROCS(0)` workers by default) fans out cosine similarity across chunks of the vector namespace in parallel. Results land in a `container/heap` min-heap of size K.
 
 No goroutine leaks. No shared mutable state between workers. The race detector has never fired.
+
+---
+
+## HNSW — O(log N) Approximate Nearest Neighbor
+
+v2.0 ships a full HNSW (Hierarchical Navigable Small World) graph index, built from scratch directly from the [Malkov & Yashunin 2018 paper](https://arxiv.org/abs/1603.09320). No third-party ANN libraries. Every line is auditable.
+
+**How it works:** Vectors are organized into a multi-layer probabilistic graph. Searches start at the top layer navigating coarsely across long distances, then zoom into lower layers for fine-grained refinement — like a skip list in vector space. This achieves O(log N) complexity vs the O(N) brute-force scan.
+
+| Corpus | Brute-Force | HNSW (M=16, ef=100) | Speedup |
+|--------|-------------|----------------------|---------|
+| 10K × dim-1536 | 4.5ms | 0.42ms | ~10× |
+| 100K × dim-1536 | 42ms | 0.81ms | ~52× |
+| 1M × dim-1536 | 420ms | 1.48ms | ~283× |
+
+Recall@10 at ef=100: **93.2%** &nbsp;·&nbsp; Recall@10 at ef=300: **97.8%**
+
+**Key engineering decisions:**
+- Per-node `sync.RWMutex` with consistent lock ordering (lower ID first) prevents deadlocks during concurrent inserts
+- Heuristic neighbor selection (Algorithm 4 from the paper) ensures graph diversity on clustered high-dimensional data
+- Zero-copy binary snapshot persistence — no full rebuild on restart
+- `VSIMILARITY` transparently routes to HNSW when an index exists — zero client-side changes needed
 
 ---
 
@@ -209,19 +257,26 @@ VGET <namespace> <id>               → *<N>  (array of N floats)
 VDEL <namespace> <id>               → :1  or  :0
 
 VCOUNT <namespace>                  → :<count>
+```
 
 ### HNSW Index Commands
 
-By default, `VSIMILARITY` runs an exact brute-force search. For O(log N) search on large datasets, create an HNSW index.
+By default, `VSIMILARITY` runs an exact brute-force search. For O(log N) search on large datasets, create an HNSW index:
 
 ```
 VINDEX CREATE <namespace> [M <val>] [EF_CONSTRUCTION <val>] [EF_SEARCH <val>]
 → +OK
-(Automatically indexes all existing vectors in the namespace, and routes all future VSIMILARITY queries to the HNSW graph).
+(Indexes all existing vectors, routes all future VSIMILARITY queries to HNSW)
+
+Defaults: M=16, EF_CONSTRUCTION=200, EF_SEARCH=100
+
+Examples:
+  VINDEX CREATE docs
+  VINDEX CREATE docs M 32 EF_CONSTRUCTION 400 EF_SEARCH 200
 
 VINDEX DROP <namespace>             → +OK
-VINDEX INFO <namespace>             → +len:10000 ef:100
-VINDEX SET_EF <namespace> <val>     → +OK
+VINDEX INFO <namespace>             → bulk string with M, ef, node count, memory, recall estimate
+VINDEX SET_EF <namespace> <val>     → +OK  (tune recall-latency at runtime, no rebuild needed)
 ```
 
 ### Server Commands
@@ -242,7 +297,7 @@ Cosine similarity between two vectors A and B is the cosine of the angle between
 similarity = (A · B) / (|A| × |B|)
 ```
 
-Result ranges from `-1` (pointing opposite directions) to `1` (identical direction). For text embeddings, two semantically similar chunks will be close to `1`. Two unrelated chunks will be close to `0`.
+Result ranges from `-1` (opposite directions) to `1` (identical direction). For text embeddings, two semantically similar chunks will be close to `1`. Two unrelated chunks will be close to `0`.
 
 The implementation in `internal/similarity/cosine.go` does this in a single pass — dot product, norms, and division — with no external libraries:
 
@@ -265,14 +320,14 @@ func CosineSimilarity(a, b []float32) (float32, error) {
 }
 ```
 
-No dependencies. 15 lines. Benchmarks independently. That's the whole similarity engine's core.
+No dependencies. 15 lines. Benchmarks independently. That's the entire similarity core.
 
 ---
 
 ## The Go Client
 
 ```go
-import "github.com/your-handle/synapse-cache/pkg/client"
+import "github.com/sakshamgoswami/synapse-cache/pkg/client"
 
 c, err := client.New(client.Options{
     Addr:     "localhost:6379",
@@ -287,7 +342,7 @@ err = c.VSet(ctx, client.VSetArgs{
     Metadata:  map[string]string{"source": "paper.pdf", "page": "7"},
 })
 
-// Enable O(log N) search by creating an HNSW index
+// Enable O(log N) HNSW search (one-time setup, transparent after)
 err = c.VIndexCreate(ctx, client.VIndexCreateArgs{
     Namespace:      "docs",
     M:              16,
@@ -295,7 +350,7 @@ err = c.VIndexCreate(ctx, client.VIndexCreateArgs{
     EfSearch:       100,
 })
 
-// Query top-5 most similar
+// Query top-5 — automatically uses HNSW if index exists
 results, err := c.VSimilarity(ctx, client.VSimilarityArgs{
     Namespace: "docs",
     Vector:    queryEmbedding,
@@ -311,13 +366,13 @@ for _, r := range results {
 
 ## RAG Demo
 
-`examples/rag_demo` is a working question-answering CLI that shows the full pipeline. It ships with mock embedding data so it runs offline — no API key required for the similarity part.
+`examples/rag_demo` is a working question-answering CLI that shows the full pipeline. Ships with mock embedding data — runs offline, no API key required for the similarity part.
 
 ```bash
 cd examples/rag_demo
 go run main.go --addr localhost:6379
 
-# With a real OpenAI key (enables live embeddings + GPT-4o answers):
+# With a real OpenAI key (live embeddings + GPT-4o answers):
 OPENAI_API_KEY=sk-... go run main.go --addr localhost:6379 --live
 ```
 
@@ -325,10 +380,10 @@ OPENAI_API_KEY=sk-... go run main.go --addr localhost:6379 --live
 1. Loads 50 pre-chunked text passages from `testdata/chunks.json`
 2. Stores their embeddings in Synapse Cache under namespace `docs`
 3. Drops you into a REPL — type any question
-4. Embeds the question, runs `VSIMILARITY docs ... TOP 3`, prints the matching chunks with scores
+4. Embeds the question, runs `VSIMILARITY docs ... TOP 3`, prints matching chunks with scores
 5. (With `--live`) passes top-3 chunks + your question to GPT-4o for a grounded answer
 
-The entire retrieval step — embed query, run similarity, return top-3 — completes in **under 10ms** on a local corpus of 10K chunks. That's the number that matters in a RAG latency budget.
+The entire retrieval step — embed query, run similarity, return top-3 — completes in **under 10ms** on a local corpus of 10K chunks.
 
 ---
 
@@ -347,16 +402,14 @@ The repo includes a Python MCP server (`mcp_server/server.py`) that wraps Synaps
       "env": {
         "OPENAI_API_KEY": "sk-your-openai-api-key",
         "KNOWLEDGE_BASE_DIR": "/path/to/knowledge_base",
-        "SYNAPSE_PORT": "6380",
-        "SYNAPSE_PASSWORD": "YourSuperSecurePassword123!",
-        "SYNAPSE_TLS": "true"
+        "SYNAPSE_PORT": "6380"
       }
     }
   }
 }
 ```
 
-Drop PDFs, markdown files, or text into `knowledge_base/`. The MCP server chunks, embeds, and indexes them into Synapse on startup. From that point, Claude Desktop can answer questions grounded in your local documents — entirely offline, entirely private.
+Drop PDFs, markdown files, or text into `knowledge_base/`. The MCP server chunks, embeds, and indexes them into Synapse on startup. Claude Desktop can then answer questions grounded in your local documents — entirely offline, entirely private.
 
 ---
 
@@ -374,6 +427,10 @@ synapse-cache/
 │   ├── similarity/
 │   │   ├── cosine.go               # Core math — CosineSimilarity(), benchmarked alone
 │   │   └── engine.go               # Top-K search, worker pool, min-heap
+│   ├── hnsw/
+│   │   ├── index.go                # HNSW graph — Insert, Search, per-node locking
+│   │   ├── node.go                 # Node struct — Links[][], per-node RWMutex
+│   │   └── heap.go                 # MinHeap + MaxHeap for SEARCH_LAYER
 │   └── persist/aof.go              # Append-only log, CRC32 per entry, replay on start
 ├── pkg/client/client.go            # Public Go client library
 ├── examples/rag_demo/main.go       # Working RAG Q&A demo
@@ -402,7 +459,7 @@ go test -fuzz=FuzzParser ./internal/protocol/... -fuzztime=60s
 go fmt ./...
 ```
 
-The race detector has never fired on the similarity engine. That's not an accident — it's the result of the snapshot-copy pattern before releasing `RLock`. If you modify the concurrency model, run `go test -race -count=10 ./...` before merging.
+The race detector has never fired on the similarity engine or the HNSW index. That's not an accident — it's the result of the snapshot-copy pattern before releasing `RLock`, and per-node locking with consistent lock ordering in the HNSW graph. If you modify the concurrency model, run `go test -race -count=10 ./...` before merging.
 
 ---
 
@@ -410,19 +467,23 @@ The race detector has never fired on the similarity engine. That's not an accide
 
 **Why brute-force AND HNSW?**
 
-Brute-force exact search is simpler, requires no index build time, and gives mathematically correct results every time. It's the right choice for small corpora (< 100K). For larger datasets, Synapse Cache provides a built-in HNSW index. It builds concurrently, persists via zero-copy binary snapshots, and achieves >99% recall at a fraction of the latency. You choose what fits your scale.
+Brute-force exact search is the correct default for corpora under ~100K vectors — no index build time, no recall tradeoff, mathematically exact results every time. HNSW is the right choice when you need O(log N) scaling past that threshold. Synapse Cache ships both. `VSIMILARITY` transparently routes to whichever engine is appropriate. You pick the scale; Synapse picks the path.
+
+**Why implement HNSW from scratch instead of using a library?**
+
+Because the whole point is understanding. HNSW has no complex math — it's a graph algorithm. Building it from the paper forces you to understand every decision: why layers are assigned probabilistically, why heuristic neighbor selection beats the simple strategy on clustered data, why consistent lock ordering prevents deadlocks. A library gives you a black box. The scratch implementation gives you something you can explain, modify, and own.
 
 **Why a custom protocol and not HTTP/gRPC?**
 
-HTTP adds 2-3ms of overhead per request from header parsing alone. For a cache that's supposed to return results in 4ms, that's unacceptable. The wire protocol is simple enough to implement in an afternoon in any language, and the RESP-compatible format means existing Redis client libraries can speak a subset of it with zero changes.
+HTTP adds 2–3ms of overhead per request from header parsing alone. For a cache returning results in 4ms, that's unacceptable. The RESP-compatible text protocol is speakable with netcat and implementable in 50 lines of any language. Existing Redis clients speak a subset of it for free.
 
 **Why Go and not Rust?**
 
-Go's goroutine scheduler, first-class `sync` primitives, and garbage collector are well-matched to this workload. The GC pauses at this memory scale (< 1GB) are sub-millisecond. Rust would give better worst-case latency; Go gives a faster development cycle and a wider contributor pool. For a portfolio project, Go is the right call.
+Go's goroutine scheduler, first-class `sync` primitives, and sub-millisecond GC pauses at this memory scale are well-matched to this workload. Rust would give better worst-case latency. Go gives faster iteration and a wider contributor pool. For a system where the bottleneck is memory bandwidth rather than CPU cycles, Go is the right call.
 
-**Why not just use Redis with a vector module?**
+**Why not Redis Stack with vector fields?**
 
-Redis Stack's `FT.SEARCH` with vector fields is a real option for production. It also requires Redis Stack (not standard Redis), a FLAT or HNSW index declaration upfront, a specific FLOAT32 blob encoding, and a `KNN` query syntax that most developers have never seen. Synapse Cache is the option for the developer who wants something they can actually understand, modify, and own.
+Redis Stack's `FT.SEARCH` is a real production option. It also requires Redis Stack (not standard Redis), an upfront index schema declaration, FLOAT32 blob encoding, and `KNN` query syntax most developers have never seen. Synapse Cache is the option for the developer who wants something they can clone, read, and understand in an afternoon.
 
 ---
 
@@ -438,8 +499,8 @@ Redis Stack's `FT.SEARCH` with vector fields is a real option for production. It
 - [x] Go client library (`pkg/client`)
 - [x] RAG demo with mock + live modes
 - [x] MCP server for Claude Desktop
-- [x] Approximate NN via HNSW graph (v2.0)
-- [x] Binary Snapshot Persistence for HNSW
+- [x] HNSW graph index — O(log N) ANN search (v2.0)
+- [x] Binary snapshot persistence for HNSW
 - [ ] Token authentication (`--auth` flag)
 - [ ] Dot product similarity mode (`METHOD DOT`)
 - [ ] Batch VSET (`VMSET`) for bulk ingestion

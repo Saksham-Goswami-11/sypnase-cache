@@ -209,6 +209,19 @@ VGET <namespace> <id>               → *<N>  (array of N floats)
 VDEL <namespace> <id>               → :1  or  :0
 
 VCOUNT <namespace>                  → :<count>
+
+### HNSW Index Commands
+
+By default, `VSIMILARITY` runs an exact brute-force search. For O(log N) search on large datasets, create an HNSW index.
+
+```
+VINDEX CREATE <namespace> [M <val>] [EF_CONSTRUCTION <val>] [EF_SEARCH <val>]
+→ +OK
+(Automatically indexes all existing vectors in the namespace, and routes all future VSIMILARITY queries to the HNSW graph).
+
+VINDEX DROP <namespace>             → +OK
+VINDEX INFO <namespace>             → +len:10000 ef:100
+VINDEX SET_EF <namespace> <val>     → +OK
 ```
 
 ### Server Commands
@@ -272,6 +285,14 @@ err = c.VSet(ctx, client.VSetArgs{
     ID:        "chunk:42",
     Vector:    []float32{0.18, -0.44, 0.99, 0.00},
     Metadata:  map[string]string{"source": "paper.pdf", "page": "7"},
+})
+
+// Enable O(log N) search by creating an HNSW index
+err = c.VIndexCreate(ctx, client.VIndexCreateArgs{
+    Namespace:      "docs",
+    M:              16,
+    EfConstruction: 200,
+    EfSearch:       100,
 })
 
 // Query top-5 most similar
